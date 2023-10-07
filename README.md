@@ -1,2 +1,2 @@
 # KinzyProject
-Private Cartoonizing Images and Videos python files.
+Private Python files.
