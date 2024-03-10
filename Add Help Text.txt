@@ -1,0 +1,49 @@
+How to create a help file for a powershell script
+
+Creating a help file for a PowerShell script involves adding comments and specially formatted sections to your script that PowerShell can recognize. PowerShell uses a system called Comment-Based Help to generate and display help information for your scripts. Here's a simple example of how you can create a help file for a PowerShell script:
+
+<#
+.SYNOPSIS
+    Short description of the script or function.
+
+.DESCRIPTION
+    Detailed description of what the script or function does.
+
+.PARAMETER ParameterName
+    Description of a script or function parameter.
+
+.EXAMPLE
+    Example of how to use the script or function.
+
+.NOTES
+    Author: Your Name
+    Date: Date of creation or last update
+#>
+
+# Your script code goes here
+
+Write-Host "Hello, World!"
+
+Explanation of the special comment-based help sections:
+
+.SYNOPSIS: A brief one-line description of the script or function.
+
+.DESCRIPTION: A more detailed description of what the script or function does.
+
+.PARAMETER ParameterName: Descriptions of parameters that your script or function accepts. Repeat this line for each parameter.
+
+.EXAMPLE: Provides examples of how to use the script or function. You can include multiple examples.
+
+.NOTES: Additional notes about the script or function, such as author information and creation/update date.
+
+Once you've added these comments to your script, you can use the Get-Help cmdlet in PowerShell to view the help information. For example:
+
+Get-Help C:\Path\To\YourScript.ps1
+
+This will display the help information you've provided in the script.
+
+If you want to save the help information to an external file, you can use the following command to create an XML-based help file:
+
+Get-Help C:\Path\To\YourScript.ps1 -Full | Export-Clixml C:\Path\To\YourScriptHelp.xml
+
+This will export the help information to an XML file, which can be useful for more complex help documentation. The -Full parameter includes all available help information.
