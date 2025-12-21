@@ -1,0 +1,31 @@
+function replaceLocalPathsWithDriveLinks() {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet(); //Uncomment to work.
+  var range = sheet.getDataRange();
+  var values = range.getValues();
+
+  // Define the folder ID where you uploaded the files
+  var folderId = '1chFd-FA1T2xlUwEf9jIZH4PfH_DxBmWW';
+  var folder = DriveApp.getFolderById(folderId);
+  var files = folder.getFiles();  // Get all files from the folder
+  
+  var fileLinks = {};
+
+  // Create a dictionary (hash map) of file names and their Drive links
+  while (files.hasNext()) {
+    var file = files.next();
+    fileLinks[file.getName()] = file.getUrl();
+  }
+
+  // Loop through the sheet to find the file names and replace the paths
+  for (var i = 1; i < values.length; i++) {  // Skip header row
+    var fileName = values[i][0] + " - AL.pdf";  // Assuming the file name is in column A
+    
+    if (fileLinks[fileName]) {
+      var driveLink = fileLinks[fileName];  // Get the corresponding Google Drive link
+      
+      // Replace the local file path with the Drive link in column B
+      sheet.getRange(i + 1, 6).setValue(driveLink);  // Column B is 2nd column
+    }
+  }
+}
+
