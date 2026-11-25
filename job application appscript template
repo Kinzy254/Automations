@@ -1,0 +1,315 @@
+/**
+ * JOB APPLICATION EMAILER (Google Apps Script)
+ *
+ * PURPOSE
+ *   Sends a personalised application email to each company in the sheet, with
+ *   two attachments: the company's application letter (Drive link in the sheet)
+ *   and the CV (RESUME_ID). Each email's wording differs slightly per company.
+ *
+ * FUNCTIONS
+ *   replaceLocalPathsWithDriveLinks()  Step 1. Replaces the C:\ paths in column E with
+ *                                      Drive links by matching file names in the
+ *                                      letters folder (folder ID set inside the function).
+ *   previewEmails()                    Step 2. Logs 8 sample emails. Sends nothing.
+ *   sendEmailsWithAttachments()        Step 3. Sends the emails and records STATUS.
+ *   buildEmail_(), toHtml_(), pick_()  Helpers that build and format the email.
+ *
+ * SHEET LAYOUT (first tab, row 1 = headers)
+ *   A Company | B Address | C Location | D Email | E Letter link | F STATUS | G PERSONAL LINE (optional)
+ *   Add a STATUS header in F1. The script fills it with "Sent", "Failed: ..." or "Skipped (...)".
+ *   PERSONAL LINE: any text in column G is added as its own paragraph in that email.
+ *
+ * LETTER FILE NAMES (must match for the link step to find them)
+ *   "APPLICATION LETTER - " + COMPANY NAME IN UPPERCASE + ".pdf"
+ *   Characters Windows disallows (< > : " / \ | ? *) are removed. A trailing dot is kept
+ *   (e.g. "... & CO..pdf"); the script also tries the name without it.
+ *   Rows with no matching file keep their old value and are listed in the log.
+ *
+ * BEFORE FIRST USE
+ *   1. Upload the letters to the Drive folder used in replaceLocalPathsWithDriveLinks().
+ *   2. Run replaceLocalPathsWithDriveLinks() and check the log for "Not found" rows.
+ *   3. Set SHEET_ID and RESUME_ID in sendEmailsWithAttachments().
+ *      Sender name, phone, email and font are in the "Sender details" section.
+ *
+ * HOW TO SEND
+ *   1. Run previewEmails() and read the samples in the log.
+ *   2. Set TEST_MODE = true and run sendEmailsWithAttachments(). It sends up to
+ *      TEST_LIMIT emails to MY_EMAIL (subject starts with [TEST for ...]) and writes
+ *      nothing to the sheet. Check the look and the attachments in Gmail and on a phone.
+ *   3. Set TEST_MODE = false and run for real. Run again to continue; rows marked
+ *      "Sent" are skipped. TEST_MODE = false SENDS REAL EMAILS; TEST_LIMIT is ignored.
+ *
+ * SETTINGS (in sendEmailsWithAttachments)
+ *   ONE_PER_COMPANY = true   Email only one address per company.
+ *   TEST_MODE / TEST_LIMIT   Safe testing (see above).
+ *   MAX_RUNTIME_MS           Stops after 5 min (Apps Script's limit is 6 min).
+ *   COL                      0-based column positions. Update if the sheet layout changes.
+ *
+ * LIMITS
+ *   - Gmail allows about 100 recipients per day (more on Workspace). The script stops
+ *     when the quota is used up; run again the next day.
+ *   - Invalid emails and missing links are marked "Failed" and not retried.
+ *     To retry a row, clear its STATUS cell.
+ *   - Bounced emails are not detected. Check the Gmail inbox for bounce notices.
+ *
+ * HOW THE EMAIL IS BUILT (buildEmail_)
+ *   Subject (4 options), greeting, opener, interest line, skills line, closing and
+ *   sign-off each rotate between options, chosen by a hash of company + email, so a
+ *   re-run gives the same email. The sentence after the interest line depends on the
+ *   firm type found in the name: big-firm names (GLOBAL_RE), CPA (CPA_RE),
+ *   "& Associates / Co / LLP" (PRACTICE_RE), or other. Generic mailboxes such as
+ *   info@ and admin@ get "Dear Team". Sent as HTML (Calibri, then Arial, 12pt) with
+ *   a plain-text fallback. Company names are escaped so "&" displays correctly.
+ */
+
+//====================================================================================================
+
+function replaceLocalPathsWithDriveLinks() {
+  var ss = SpreadsheetApp.openById("12ZaXQQqfUBpl8w0hnMHU_FLV0XRYIXljYjO13r_M1GU");
+  var sheet = ss.getSheets()[0];
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return;
+
+  var PATH_COL = 5; // FULL PATH column (E)
+  var names = sheet.getRange(2, 1, lastRow - 1, 1).getValues();        // column A: company name
+  var paths = sheet.getRange(2, PATH_COL, lastRow - 1, 1).getValues(); // column E: current value
+
+  // Map of Drive file name -> URL
+  var folder = DriveApp.getFolderById('13s4ZLszIaZ_p2WqgpgVLbdWsf6DWawIp');
+  var files = folder.getFiles();
+  var fileLinks = {};
+  while (files.hasNext()) {
+    var f = files.next();
+    fileLinks[f.getName()] = f.getUrl();
+  }
+
+  var missing = [];
+  var matched = 0;
+
+  for (var i = 0; i < names.length; i++) {
+    var company = String(names[i][0]).trim();
+    if (!company) continue;
+
+    // Same rules used to build the local file names:
+    // uppercase, drop characters Windows disallows, trim spaces at the ends
+    // Windows-illegal characters are removed; trailing dots are kept (e.g. "CO..pdf")
+    var base = company.toUpperCase()
+      .replace(/[<>:"\/\\|?*]/g, '')
+      .trim();
+
+    var prefix = "APPLICATION LETTER - ";
+    var candidates = [
+      prefix + base + ".pdf",                         // exact: "... & CO..pdf"
+      prefix + base.replace(/[. ]+$/, '') + ".pdf"    // fallback: "... & CO.pdf"
+    ];
+
+    var link = null;
+    for (var c = 0; c < candidates.length; c++) {
+      if (fileLinks[candidates[c]]) { link = fileLinks[candidates[c]]; break; }
+    }
+
+    if (link) {
+      paths[i][0] = link;
+      matched++;
+    } else {
+      missing.push("Row " + (i + 2) + ": " + candidates[0]);
+    }
+  }
+
+  // One batch write instead of one call per row
+  sheet.getRange(2, PATH_COL, paths.length, 1).setValues(paths);
+
+  Logger.log("Matched: " + matched + " | Not found: " + missing.length);
+  if (missing.length) Logger.log(missing.join("\n"));
+}
+
+//===================================================================================================
+
+function sendEmailsWithAttachments() {
+  // ---- Settings ----
+  var SHEET_ID = "12ZaXQQqfUBpl8w0hnMHU_FLV0XRYIXljYjO13r_M1GU";
+  var RESUME_ID = "1kUo8O-gEohaCFCqWl8Q2bZcf9Xu1C-JU";
+  // 0-based: A=company, D=email, E=Drive link, F=status, G=optional personal line
+  var COL = { company: 0, email: 3, link: 4, status: 5, personal: 6 };
+  var ONE_PER_COMPANY = false;  // true = email only one address per company
+  var TEST_MODE = false;         // true = send to yourself, write nothing to the sheet
+  var TEST_LIMIT = 2;           // max emails in test mode
+  var MY_EMAIL = "nyanceraonsarigo@gmail.com";
+  var MAX_RUNTIME_MS = 5 * 60 * 1000;
+  // ------------------
+
+  var startTime = Date.now();
+  var sheet = SpreadsheetApp.openById(SHEET_ID).getSheets()[0];
+  var data = sheet.getDataRange().getValues();
+  var resumeBlob = DriveApp.getFileById(RESUME_ID).getBlob();
+  var emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
+  function setStatus(row, text) {
+    if (TEST_MODE) { Logger.log("(test) row " + (row + 1) + ": " + text); return; }
+    sheet.getRange(row + 1, COL.status + 1).setValue(text);
+  }
+
+  // Companies already emailed in earlier runs
+  var done = {};
+  for (var r = 1; r < data.length; r++) {
+    if (data[r][COL.status] === "Sent") done[String(data[r][COL.company]).trim().toLowerCase()] = true;
+  }
+
+  var sentThisRun = 0;
+  for (var i = 1; i < data.length; i++) {
+    if (Date.now() - startTime > MAX_RUNTIME_MS) { Logger.log("Time limit reached. Run again to continue."); break; }
+    if (MailApp.getRemainingDailyQuota() < 1) { Logger.log("Daily email quota used up. Run again tomorrow."); break; }
+    if (TEST_MODE && sentThisRun >= TEST_LIMIT) { Logger.log("Test limit reached."); break; }
+
+    var company = String(data[i][COL.company]).trim();
+    var email = String(data[i][COL.email]).trim();
+    var link = String(data[i][COL.link]);
+    var status = data[i][COL.status];
+    var personal = data[i][COL.personal] ? String(data[i][COL.personal]).trim() : "";
+    var key = company.toLowerCase();
+
+    if (!company || status === "Sent") continue;
+    if (ONE_PER_COMPANY && done[key]) { setStatus(i, "Skipped (company already emailed)"); continue; }
+    if (!emailRe.test(email)) { setStatus(i, "Failed: invalid email"); continue; }
+
+    var m = link.match(/\/d\/([-\w]+)/) || link.match(/[?&]id=([-\w]+)/);
+    if (!m) { setStatus(i, "Failed: no Drive link"); continue; }
+
+    var msg = buildEmail_(company, email, personal);
+
+    try {
+      var letterBlob = DriveApp.getFileById(m[1]).getBlob();
+      MailApp.sendEmail({
+        to: TEST_MODE ? MY_EMAIL : email,
+        subject: (TEST_MODE ? "[TEST for " + email + "] " : "") + msg.subject,
+        body: msg.body,           // plain-text fallback
+        htmlBody: msg.htmlBody,   // formatted version shown by Gmail/Outlook
+        name: SENDER_NAME,        // sender display name
+        attachments: [letterBlob, resumeBlob]
+      });
+      if (!TEST_MODE) { setStatus(i, "Sent"); done[key] = true; }
+      sentThisRun++;
+      Logger.log("Sent " + sentThisRun + ": " + company + " <" + email + ">");
+      Utilities.sleep(Math.floor(Math.random() * 3001) + 2000);
+    } catch (e) {
+      Logger.log("Error for " + company + ": " + e.message);
+      setStatus(i, "Failed: " + e.message.substring(0, 80));
+    }
+  }
+  Logger.log("Done. Sent this run: " + sentThisRun + " | Time: " + (Date.now() - startTime) / 1000 + "s");
+}
+
+/* Run this to read 8 sample emails in the log without sending anything */
+function previewEmails() {
+  var sheet = SpreadsheetApp.openById("12ZaXQQqfUBpl8w0hnMHU_FLV0XRYIXljYjO13r_M1GU").getSheets()[0];
+  var data = sheet.getDataRange().getValues();
+  var step = Math.max(1, Math.floor((data.length - 1) / 8));
+  for (var i = 1, n = 0; i < data.length && n < 8; i += step, n++) {
+    var msg = buildEmail_(String(data[i][0]).trim(), String(data[i][3]).trim(), data[i][6] ? String(data[i][6]).trim() : "");
+    Logger.log("=== " + data[i][0] + " <" + data[i][3] + ">\nSUBJECT: " + msg.subject + "\n\n" + msg.body + "\n");
+  }
+}
+
+/* ---------- Sender details (edit here) ---------- */
+var SENDER_NAME = "Doris Onsarigo";
+var SENDER_PHONE = "+254 183 967 304";
+var SENDER_EMAIL = "dorisonsarigo254@gmail.com";
+var FONT_STACK = "Calibri, Arial, Helvetica, sans-serif";
+
+/* ---------- Email builder ---------- */
+var GLOBAL_RE = /\b(BDO|PKF|KPMG|DELOITTE|PWC|PRICEWATERHOUSE\w*|EY|ERNST|GRANT THORNTON|BAKER TILLY|CROWE|MAZARS|RSM|KRESTON|HLB|NEXIA)\b/i;
+var CPA_RE = /\bCPA\b|\bCPAK\b|CERTIFIED PUBLIC|\(K\)/i;
+var PRACTICE_RE = /ASSOCIATES?|PARTNERS|\bAND CO\b|& CO|COMPANY|\bLLP\b|CONSULT/i;
+var GENERIC_BOX_RE = /^(info|admin|audit|office|contact|contacts|enquiries|inquiries|hr|careers|recruitment|mail|reception|accounts|finance|consulting|support|hello|kenya|nairobi|nbi|ke|partners|auditors)\d*$/i;
+
+function hash_(s) { var h = 0; for (var k = 0; k < s.length; k++) h = (h * 31 + s.charCodeAt(k)) >>> 0; return h; }
+function pick_(arr, seed, salt) { return arr[hash_(seed + "|" + salt) % arr.length]; }  // same company+email always gets the same wording
+
+// Escape text so names like "Bon&Drew" or "A & B" display correctly in HTML
+function esc_(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+function toHtml_(paragraphs, signoff) {
+  var p = paragraphs.map(function (t) {
+    return '<p style="margin:0 0 12px 0;">' + esc_(t) + '</p>';
+  }).join("");
+  var tel = SENDER_PHONE.replace(/[^\d+]/g, "");
+  return '<div style="font-family:' + FONT_STACK + ';font-size:12pt;line-height:1.5;color:#222222;">' +
+    p +
+    '<p style="margin:16px 0 0 0;">' + esc_(signoff) + '<br>' +
+    '<b>' + esc_(SENDER_NAME) + '</b><br>' +
+    '<a href="tel:' + tel + '" style="color:#222222;text-decoration:none;">' + esc_(SENDER_PHONE) + '</a><br>' +
+    '<a href="mailto:' + SENDER_EMAIL + '" style="color:#1a56a0;">' + esc_(SENDER_EMAIL) + '</a></p>' +
+    '</div>';
+}
+
+function buildEmail_(company, email, personal) {
+  var seed = company.toLowerCase() + "|" + email.toLowerCase();
+  var local = email.split("@")[0];
+  var type = GLOBAL_RE.test(company) ? "global" : CPA_RE.test(company) ? "cpa" : PRACTICE_RE.test(company) ? "practice" : "personal";
+
+  var subject = pick_([
+    "Application for Accounts Assistant Position - Doris Onsarigo",
+    "Finance & Accounting Application - Doris Onsarigo",
+    "Application for a Finance & Accounting Position at " + company,
+    "Application for Accounts Assistant Position - Doris Onsarigo | " + company
+  ], seed, "s");
+
+  var greeting = GENERIC_BOX_RE.test(local)
+    ? pick_(["Dear Team,", "Dear Hiring Team,"], seed, "g")
+    : pick_(["Dear Hiring Manager,", "Dear Sir/Madam,"], seed, "g");
+
+  var opener = pick_([
+    "I hope this message finds you well.",
+    "I hope you are doing well.",
+    "I hope this email finds you well."
+  ], seed, "o");
+
+  var interest = pick_([
+    "I am writing to apply for an accounts assistant position at " + company + ". I hold a degree in Finance and, with my experience, I am keen to apply my analytical and financial skills in a professional accounting environment.",
+    "I am reaching out to express my interest in joining " + company + " as an accounts assistant. With my experience and a degree in Finance, I am eager to put my financial knowledge and attention to detail to work in a professional setting.",
+    "I would like to be considered for an accounts assistant role at " + company + ". With my experience and a degree in Finance, I am looking to build my career in accounting and finance."
+  ], seed, "i");
+
+  var typeLines = {
+    global: [
+      "I am particularly drawn to the structured training and professional standards that come with a firm like yours.",
+      "Working within a well-established firm is exactly the environment in which I hope to grow."
+    ],
+    cpa: [
+      "I am keen to learn from experienced accountants and to build a long-term career in the profession.",
+      "I would value the chance to learn from practising professionals and grow within the field."
+    ],
+    practice: [
+      "I value the hands-on experience that comes from working in a practice, where one learns across a variety of clients.",
+      "I am keen to learn from experienced colleagues and to contribute wherever I am needed in a busy practice."
+    ],
+    personal: [
+      "I am keen to learn from experienced professionals and to contribute from day one.",
+      "I would value the chance to learn from your experience and support your work."
+    ]
+  };
+  var typeLine = pick_(typeLines[type], seed, "t");
+
+  var skills = pick_([
+    "I am organised, detail-oriented and comfortable working with figures.",
+    "I take pride in accuracy, meeting deadlines and learning quickly.",
+    "I am diligent, numerate and eager to grow and learn more."
+  ], seed, "k");
+
+  var closing = pick_([
+    "I have attached my application letter and CV for your consideration. I would welcome the opportunity to discuss how I can support your team, and I look forward to hearing from you.",
+    "Please find my application letter and CV attached. Thank you for your time and consideration, and I look forward to hearing from you.",
+    "My application letter and CV are attached for your review. I would be glad to meet or speak at your convenience."
+  ], seed, "c");
+
+  var signoff = pick_(["Kind regards,", "Warm regards,", "Best regards,"], seed, "r");
+
+  var parts = [greeting, opener, interest + " " + typeLine];
+  if (personal) parts.push(personal);
+  parts.push(skills, closing);
+
+  var body = parts.join("\n\n") + "\n\n" + signoff + "\n" + SENDER_NAME + "\n" + SENDER_PHONE + "\n" + SENDER_EMAIL;
+  return { subject: subject, body: body, htmlBody: toHtml_(parts, signoff) };
+}
